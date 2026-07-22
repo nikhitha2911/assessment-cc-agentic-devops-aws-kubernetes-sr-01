@@ -1,0 +1,54 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: rdicidr
+  namespace: production
+  labels:
+    app: rdicidr
+spec:
+  serviceName: rdicidr-service
+  replicas: 3
+  selector:
+    matchLabels:
+      app: rdicidr
+  template:
+    metadata:
+      labels:
+        app: rdicidr
+    spec:
+      containers:
+        - name: rdicidr
+          image: rdicidr:latest
+          # IfNotPresent is correct here: this image is built locally and loaded
+          # straight into the cluster's container runtime, not pulled from a
+          # registry. "Always" would make the kubelet try to pull "rdicidr:latest"
+          # from Docker Hub, where it doesn't exist, and fail with ImagePullBackOff.
+          # For a real registry-backed deployment (see the CD pipeline), use an
+          # immutable tag (e.g. the image digest or a commit SHA) instead of
+          # ":latest" so pull policy ambiguity never comes up at all.
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 80
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "128Mi"
+              cpu: "250m"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3

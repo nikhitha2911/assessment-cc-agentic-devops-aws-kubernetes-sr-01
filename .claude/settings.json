@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .claude/hooks/session-start-log.js 2>/dev/null || true",
+            "statusMessage": "Reading .chat-history/log.md"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .claude/hooks/stop-log.js 2>/dev/null || true",
+            "statusMessage": "Logging session to .chat-history/log.md"
+          }
+        ]
+      }
+    ]
+  }
+}
