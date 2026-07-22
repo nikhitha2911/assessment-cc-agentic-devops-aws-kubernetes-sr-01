@@ -6,8 +6,10 @@ on:
       - main
       - 'feature-*'
   pull_request:
-    branches:
-      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
 
 defaults:
   run:
@@ -20,8 +22,8 @@ jobs:
       - uses: actions/checkout@v3
       - uses: actions/setup-node@v3
         with:
-          node-version: '14'
-      - run: npm ci
+          node-version-file: codebase/rdicidr-0.1.0/.nvmrc
+      - run: npm install
       - uses: actions/cache/save@v3
         with:
           path: codebase/rdicidr-0.1.0/node_modules
@@ -34,37 +36,102 @@ jobs:
       - uses: actions/checkout@v3
       - uses: actions/setup-node@v3
         with:
-          node-version: '14'
-      - uses: actions/cache/restore@v3
+          node-version-file: codebase/rdicidr-0.1.0/.nvmrc
+      - id: cache-restore
+        uses: actions/cache/restore@v3
         with:
           path: codebase/rdicidr-0.1.0/node_modules
           key: node-modules-${{ hashFiles('codebase/rdicidr-0.1.0/package-lock.json') }}
+      - if: steps.cache-restore.outputs.cache-hit != 'true'
+        run: npm install
       - run: npm run lint
+      - run: npm run prettier
 
   test:
-    needs: install
+    needs: lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
       - uses: actions/setup-node@v3
         with:
-          node-version: '14'
-      - uses: actions/cache/restore@v3
+          node-version-file: codebase/rdicidr-0.1.0/.nvmrc
+      - id: cache-restore
+        uses: actions/cache/restore@v3
         with:
           path: codebase/rdicidr-0.1.0/node_modules
           key: node-modules-${{ hashFiles('codebase/rdicidr-0.1.0/package-lock.json') }}
-      - run: npm test -- --watchAll=false
+      - if: steps.cache-restore.outputs.cache-hit != 'true'
+        run: npm install
+      - run: CI=true npm run test
 
   build:
-    needs: install
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
       - uses: actions/setup-node@v3
         with:
-          node-version: '14'
-      - uses: actions/cache/restore@v3
+          node-version-file: codebase/rdicidr-0.1.0/.nvmrc
+      - id: cache-restore
+        uses: actions/cache/restore@v3
         with:
           path: codebase/rdicidr-0.1.0/node_modules
-          key: deps-${{ hashFiles('codebase/rdicidr-0.1.0/package-lock.json') }}
+          key: node-modules-${{ hashFiles('codebase/rdicidr-0.1.0/package-lock.json') }}
+      - if: steps.cache-restore.outputs.cache-hit != 'true'
+        run: npm install
       - run: npm run build
+
+  deploy:
+    needs: build
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag, and push image to ECR
+        id: build-image
+        working-directory: codebase/rdicidr-0.1.0
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -t "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" .
+          docker push "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Download current ECS task definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition rdicidr-task \
+            --query 'taskDefinition' \
+            --output json \
+          | jq 'del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy)' \
+          > task-definition.json
+
+      - name: Render new task definition with the pushed image
+        id: render-task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: codebase/rdicidr-0.1.0/task-definition.json
+          container-name: rdicidr
+          image: ${{ steps.build-image.outputs.image }}
+
+      - name: Deploy new task definition to ECS
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.render-task-def.outputs.task-definition }}
+          service: ${{ vars.ECS_SERVICE }}
+          cluster: ${{ vars.ECS_CLUSTER }}
+          wait-for-service-stability: true
